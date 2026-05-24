@@ -12,6 +12,7 @@
 #include <linux/slab.h>
 #include <linux/spi/spi.h>
 #include <linux/platform_device.h>
+#include <linux/device.h>
 
 #include "ch347.h"
 
@@ -248,13 +249,25 @@ static int ch347_rdwr(struct ch347_spi *ch347, const u8 *tx_data, u8 *rx_data, u
 	return 0;
 }
 
+static void set_cs(struct ch347_spi *ch347, struct spi_device *spi, bool enable)
+{
+	if (!(spi->mode & SPI_NO_CS))
+		return;
+
+	if (spi->mode & SPI_CS_HIGH)
+		enable = !enable;
+
+	ch347_set_cs(ch347, spi->chip_select[0], enable);
+}
+
+
 static int ch347_transfer_one_message(struct spi_controller *controller, struct spi_message *m)
 {
 	struct ch347_spi *ch347 = spi_controller_get_devdata(controller);
 	struct spi_device *spi = m->spi;
 	struct spi_transfer *xfer = list_first_entry(&m->transfers, struct spi_transfer, transfer_list);
-	unsigned int cs_change = 1;
-	int rv;
+	bool keep_cs = false;
+	int rv = 0;
 
 	m->status = 0;
 	m->actual_length = 0;
@@ -270,15 +283,9 @@ static int ch347_transfer_one_message(struct spi_controller *controller, struct 
 		}
 	}
 
+	set_cs(ch347, spi, true);
+
 	list_for_each_entry(xfer, &m->transfers, transfer_list) {
-		if ((spi->mode & SPI_NO_CS) == 0) {
-			if (cs_change) {
-				ch347_set_cs(ch347, spi->chip_select[0], (spi->mode & SPI_CS_HIGH) ? false : true);
-			}
-
-			cs_change = xfer->cs_change;
-		}
-
 		rv = ch347_rdwr(ch347, xfer->tx_buf, xfer->rx_buf, xfer->len);
 		if (rv < 0) {
 			dev_err(&ch347->pdev->dev, "%s: Write/read failed: %d", __func__, rv);
@@ -287,16 +294,20 @@ static int ch347_transfer_one_message(struct spi_controller *controller, struct 
 		}
 		m->actual_length += xfer->len;
 
-		if (((spi->mode & SPI_NO_CS) == 0) && cs_change) {
-			ch347_set_cs(ch347, spi->chip_select[0], (spi->mode & SPI_CS_HIGH) ? true : false);
+		if (xfer->cs_change) {
+			if (list_is_last(&xfer->transfer_list, &m->transfers)) {
+				keep_cs = true;
+			} else {
+				// toggle CS
+				set_cs(ch347, spi, false);
+				set_cs(ch347, spi, true);
+			}
 		}
 	}
 
-	if (((spi->mode & SPI_NO_CS) == 0) && !cs_change) {
-		ch347_set_cs(ch347, spi->chip_select[0], (spi->mode & SPI_CS_HIGH) ? true : false);
-	}
-
 msg_done:
+	if (rv < 0 || !keep_cs)
+		set_cs(ch347, spi, false);
 	mutex_unlock(&ch347->io_mutex);
 	spi_finalize_current_message(controller);
 	return 0;
@@ -445,9 +456,15 @@ static int ch347_spi_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	int rv;
 
+
+  dev_info(dev, "Entered CH347 spi ch347_spi_probe");
+
 	controller = spi_alloc_host(dev, sizeof(struct ch347_spi));
 	if (!controller)
+  {
+    dev_info(dev, "Failed to allocate SPI host %s, %s, %d", __FILE__, __func__, __LINE__);
 		return -ENOMEM;
+  }
 	platform_set_drvdata(pdev, controller);
 	ch347 = spi_controller_get_devdata(controller);
 
@@ -461,14 +478,15 @@ static int ch347_spi_probe(struct platform_device *pdev)
 	mutex_init(&ch347->io_mutex);
 
 	rv = ch347_get_hw_config(ch347);
-	if (rv < 0) {
+	if (rv < 0)
+  {
 		dev_err(dev, "%s: Failed to get SPI configuration: %d", __func__, rv);
 		return rv;
 	}
 
-	if (num_cs != 1 && num_cs != 2) {
-		dev_err(dev, "%s: Invalid num_cs value %d, using default %d",
-			__func__, num_cs, DEFAULT_NUM_CS);
+	if (num_cs != 1 && num_cs != 2)
+  {
+		dev_err(dev, "%s: Invalid num_cs value %d, using default %d", __func__, num_cs, DEFAULT_NUM_CS);
 		num_cs = DEFAULT_NUM_CS;
 	}
 
@@ -484,7 +502,46 @@ static int ch347_spi_probe(struct platform_device *pdev)
 
 	rv = devm_spi_register_controller(dev, controller);
 	if (rv < 0)
+  {
+    dev_info(dev, "Failed to register SPI controller %s, %s, %d", __FILE__, __func__, __LINE__);
 		return rv;
+  }
+
+  /* ------------------- ADD THIS SECTION ------------------- */
+  {
+    struct spi_board_info spi_device_info =
+    {
+      .modalias = "spidev",       /* Bind to spidev driver */
+      .max_speed_hz = MAX_SPI_SPEED,
+      .bus_num = controller->bus_num,
+      .chip_select = 0,           /* First CS line */
+      .mode = SPI_MODE_0,
+    };
+
+    int rc = add_slave(ch347, &spi_device_info, 8);
+    if (rc == 0)
+    {
+      unsigned int cs = spi_device_info.chip_select;
+      struct spi_device *spi_dev = ch347->slaves[cs];
+      dev_info(dev, "Created default spidev%d.%d\n",
+               spi_dev->master->bus_num, spi_dev->chip_select[0]);
+
+      struct device_driver *spidev_drv = driver_find("spidev", &spi_bus_type);
+      if (spidev_drv != NULL)
+      {
+        dev_info(dev, "Found spidev");
+      }else
+      {
+        dev_info(dev, "Did not find spidev");
+      }
+    } else
+    {
+      dev_warn(dev, "Failed to create default spidev device\n");
+    }
+  }
+  /* -------------------------------------------------------- */
+
+
 	rv = device_create_file(&controller->dev, &dev_attr_new_device);
 	if (rv) {
 		dev_err(dev, "%s: Can not create 'new_device' file: %d", __func__, rv);
@@ -499,11 +556,13 @@ static int ch347_spi_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static void ch347_spi_remove(struct platform_device *pdev)
+static int ch347_spi_remove(struct platform_device *pdev)
 {
 	struct spi_controller *controller = platform_get_drvdata(pdev);
 	device_remove_file(&controller->dev, &dev_attr_new_device);
 	device_remove_file(&controller->dev, &dev_attr_delete_device);
+
+	return 0;
 }
 
 static struct platform_driver ch347_spi_driver = {

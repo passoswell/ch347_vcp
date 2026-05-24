@@ -623,28 +623,64 @@ static void ch347_disconnect(struct usb_interface *interface)
 static int ch347_probe(struct usb_interface *interface, const struct usb_device_id *usb_id)
 {
 	struct usb_host_interface *hostif = interface->cur_altsetting;
-	struct usb_endpoint_descriptor *epin;
-	struct usb_endpoint_descriptor *epout;
+	struct usb_endpoint_descriptor *epin = NULL;
+	struct usb_endpoint_descriptor *epout = NULL;
 	struct device *dev = &interface->dev;
 	struct ch347_dev *ch347;
 	int ret;
 
-	if (hostif->desc.bInterfaceNumber != 2 ||
-	    hostif->desc.bNumEndpoints < 2)
-		return -ENODEV;
+  dev_info(&interface->dev, "Entered CH347 mfd ch347_probe");
 
-	epout = &hostif->endpoint[0].desc;
-	if (!usb_endpoint_is_bulk_out(epout))
-		return -ENODEV;
-	epin = &hostif->endpoint[1].desc;
-	if (!usb_endpoint_is_bulk_in(epin))
-		return -ENODEV;
+  if (hostif->desc.bInterfaceNumber != 2 || hostif->desc.bNumEndpoints < 2)
+  {
+    dev_info(&interface->dev, "Not enough interfaces or endpoints found, line %d", __LINE__);
+    return -ENODEV;
+  }
 
-	ch347 = kzalloc(sizeof(*ch347), GFP_KERNEL);
-	if (!ch347)
-		return -ENOMEM;
+  for( int index = 0; index < hostif->desc.bNumEndpoints; index++)
+  {
 
-	ch347->ep_out = epout->bEndpointAddress;
+    if (usb_endpoint_is_bulk_out(&hostif->endpoint[index].desc))
+    {
+      if (epout == NULL)
+      {
+        epout = &hostif->endpoint[index].desc;
+      }
+      else
+      {
+        dev_info(&interface->dev, "Failed finding bulk_out endpoint, line %d", __LINE__);
+        return -ENODEV;
+      }
+    }
+    else if (usb_endpoint_is_bulk_in(&hostif->endpoint[index].desc))
+    {
+      if (epin == NULL)
+      {
+        epin = &hostif->endpoint[index].desc;
+      }
+      else
+      {
+        dev_info(&interface->dev, "Failed finding bulk_in endpoint, line %d", __LINE__);
+        return -ENODEV;
+      }
+    }
+
+  }
+
+  if(epout == NULL || epin == NULL)
+  {
+    dev_info(&interface->dev, "Failed finding endpoints, line %d", __LINE__);
+    return -ENODEV;
+  }
+
+  ch347 = kzalloc(sizeof(*ch347), GFP_KERNEL);
+  if (!ch347)
+  {
+    dev_info(&interface->dev, "Failed kzalloc, line %d", __LINE__);
+    return -ENOMEM;
+  }
+
+  ch347->ep_out = epout->bEndpointAddress;
 	ch347->ep_in = epin->bEndpointAddress;
 	ch347->usb_dev = usb_get_dev(interface_to_usbdev(interface));
 	ch347->interface = interface;
@@ -656,9 +692,14 @@ static int ch347_probe(struct usb_interface *interface, const struct usb_device_
 
 	usb_set_intfdata(interface, ch347);
 	if (usb_id->idProduct == CH347_USB_DEVICE_M3)
-		ch347->mode = CH347_MODE_3;
-	else
-		ch347->mode = CH347_MODE_1;
+  {
+    dev_info(&interface->dev, "CH347_USB_DEVICE_M3");
+    ch347->mode = CH347_MODE_3;
+  }else
+  {
+    dev_info(&interface->dev, "CH347_USB_DEVICE_M1");
+    ch347->mode = CH347_MODE_1;
+  }
 
 	ret = ch347_init_buffers(ch347);
 	if (ret)

@@ -1,0 +1,10 @@
+# Change permission for i2c, gpio and spi peripherals
+SUBSYSTEM=="i2c",KERNEL=="i2c-*", GROUP="i2c", MODE="0660"
+SUBSYSTEM=="gpio",KERNEL=="gpiochip*", GROUP="gpio", MODE="0660"
+
+# Detect cvh347 on mode 1 and automatically bind its chip-select 0 to spidev
+SUBSYSTEM=="spi", ACTION=="add", KERNEL=="spi*\.0", \
+  ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55db", \
+  RUN+="/bin/sh -c 'd=%k; echo spidev > /sys/bus/spi/devices/$d/driver_override && echo $d > /sys/bus/spi/drivers/spidev/bind'"
+
+SUBSYSTEM=="spidev", KERNEL=="spidev*", GROUP="spi", MODE="0660"
